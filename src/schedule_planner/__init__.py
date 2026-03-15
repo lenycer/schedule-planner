@@ -1,0 +1,2 @@
+"""Nurse schedule planner MVP."""
+

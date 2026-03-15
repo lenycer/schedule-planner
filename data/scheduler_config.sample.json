@@ -1,0 +1,9 @@
+{
+  "year": 2026,
+  "month": 4,
+  "nurse_count": 24,
+  "center_day_nurse_id": "N001",
+  "center_evening_nurse_id": "N002",
+  "random_seed": 7,
+  "max_attempts": 5000
+}
