@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 from collections import Counter
 
 from .generator import GeneratedSchedule, build_requirements, estimate_team_shift_capacity
@@ -8,6 +9,8 @@ from .rules import calculate_soft_penalty, allows_five_streak_exception, weekly_
 
 
 NIGHT_KEEP_MONTHLY_N_TARGET = 15
+MIN_OFF_DAYS_PER_MONTH = 10
+NON_NIGHT_KEEP_MAX_NIGHTS_PER_MONTH = 7
 
 
 def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: SchedulerConfig) -> list[str]:
@@ -18,7 +21,7 @@ def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: 
     evening_center_off_days = parse_wanted_off_days(nurse_by_id[config.center_evening_nurse_id].wanted_off)
 
     for nurse_id, row in schedule.assignments.items():
-        violations.extend(validate_nurse_row(nurse_by_id[nurse_id], row, schedule.dates))
+        violations.extend(validate_nurse_row(nurse_by_id[nurse_id], row, schedule.dates, config))
         violations.extend(validate_five_streak_exception(nurse_by_id[nurse_id], row, schedule.dates, config))
 
     for day_index, requirement in enumerate(requirements):
@@ -38,36 +41,39 @@ def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: 
             )
         )
 
-    for day_index, current in enumerate(schedule.dates):
-        if current.weekday() < 5:
-            if current.day in day_center_off_days:
-                if schedule.assignments[config.center_day_nurse_id][day_index] != "O":
-                    violations.append(f"{current.isoformat()} 데이 중앙 근무자 wanted off 미반영")
-            elif schedule.assignments[config.center_day_nurse_id][day_index] != "D":
-                violations.append(f"{current.isoformat()} 데이 중앙 근무자 미배정")
-            if current.day in evening_center_off_days:
-                if schedule.assignments[config.center_evening_nurse_id][day_index] != "O":
-                    violations.append(f"{current.isoformat()} 이브 중앙 근무자 wanted off 미반영")
-            elif schedule.assignments[config.center_evening_nurse_id][day_index] != "E":
-                violations.append(f"{current.isoformat()} 이브 중앙 근무자 미배정")
-
     violations.extend(validate_center_assignments(schedule, config))
     violations.extend(validate_monthly_team_coverage(schedule, nurses, config))
     return violations
 
 
-def validate_nurse_row(nurse: Nurse, row: list[str], dates: list) -> list[str]:
+def validate_nurse_row(
+    nurse: Nurse,
+    row: list[str],
+    dates: list,
+    config: SchedulerConfig,
+) -> list[str]:
     violations: list[str] = []
     night_count = row.count("N")
     allowed_shift_types = parse_allowed_shift_types(nurse.allowed_shift_types)
     wanted_off_days = parse_wanted_off_days(nurse.wanted_off)
+    is_full_month_row = bool(dates) and len(row) == calendar.monthrange(dates[0].year, dates[0].month)[1]
     if is_night_keep(nurse):
         if night_count != NIGHT_KEEP_MONTHLY_N_TARGET:
             violations.append(f"{nurse.nurse_id} night keep 월간 N 고정 수량 불일치: {night_count}")
         if any(code not in {"N", "O"} for code in row):
             violations.append(f"{nurse.nurse_id} night keep N/O 외 근무 배정")
-    elif night_count > nurse.max_nights_per_month:
+    elif night_count > min(nurse.max_nights_per_month, NON_NIGHT_KEEP_MAX_NIGHTS_PER_MONTH):
         violations.append(f"{nurse.nurse_id} 월간 N 초과: {night_count}")
+    if (
+        is_full_month_row
+        and nurse.nurse_id not in {config.center_day_nurse_id, config.center_evening_nurse_id}
+        and row.count("O") < MIN_OFF_DAYS_PER_MONTH
+    ):
+        violations.append(f"{nurse.nurse_id} 최소 O 부족: {row.count('O')}")
+    if is_full_month_row:
+        for shift in allowed_shift_types:
+            if row.count(shift) == 0:
+                violations.append(f"{nurse.nurse_id} allowed_shift_types 필수 근무 누락: {shift}")
 
     consecutive_work = 0
     consecutive_n = 0

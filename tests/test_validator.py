@@ -98,6 +98,55 @@ class ValidatorTest(unittest.TestCase):
         self.assertTrue(any("데이 중앙 근무자 D/O 외 배정" in violation for violation in violations))
         self.assertTrue(any("이브 중앙 근무자 E/O 외 배정" in violation for violation in violations))
 
+    def test_validate_schedule_detects_missing_allowed_shift_type_and_min_offs(self) -> None:
+        nurse = Nurse("N001", "김하린", allowed_shift_types="DE")
+        violations = validate_schedule(
+            GeneratedSchedule(
+                dates=build_month_dates(2026, 4),
+                assignments={"N001": ["D"] * 21 + ["O"] * 9, "N999": ["O"] * 30},
+                hard_violations=[],
+                soft_penalty=0,
+            ),
+            [nurse, Nurse("N999", "센터", team="CENTER", competency_level=3)],
+            SchedulerConfig(
+                year=2026,
+                month=4,
+                nurse_count=2,
+                center_day_nurse_id="N999",
+                center_evening_nurse_id="N999",
+            ),
+        )
+
+        self.assertTrue(any("allowed_shift_types 필수 근무 누락: E" in violation for violation in violations))
+        self.assertTrue(any("최소 O 부족" in violation for violation in violations))
+
+    def test_validate_schedule_allows_center_weekday_off_when_assignment_type_is_valid(self) -> None:
+        violations = validate_schedule(
+            GeneratedSchedule(
+                dates=build_month_dates(2026, 4)[:2],
+                assignments={
+                    "N001": ["O", "D"],
+                    "N002": ["O", "E"],
+                },
+                hard_violations=[],
+                soft_penalty=0,
+            ),
+            [
+                Nurse("N001", "김하린", team="CENTER", competency_level=3),
+                Nurse("N002", "이서윤", team="CENTER", competency_level=3),
+            ],
+            SchedulerConfig(
+                year=2026,
+                month=4,
+                nurse_count=2,
+                center_day_nurse_id="N001",
+                center_evening_nurse_id="N002",
+            ),
+        )
+
+        self.assertFalse(any("데이 중앙 근무자 미배정" in violation for violation in violations))
+        self.assertFalse(any("이브 중앙 근무자 미배정" in violation for violation in violations))
+
     def test_validate_schedule_detects_monthly_team_coverage_shortfall_when_capacity_is_sufficient(self) -> None:
         nurses = [
             Nurse("N001", "센터D", team="CENTER", competency_level=3),

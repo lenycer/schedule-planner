@@ -23,6 +23,9 @@ SHIFTS = ("D", "E", "N", "O", "P")
 WORK_SHIFTS = ("D", "E", "N", "P")
 NIGHT_KEEP_MONTHLY_N_TARGET = 15
 TEAM_DAILY_COVER_PENALTY = 3
+MIN_OFF_DAYS_PER_MONTH = 10
+CENTER_WEEKDAY_OFF_PENALTY = 20
+NON_NIGHT_KEEP_MAX_NIGHTS_PER_MONTH = 7
 
 
 @dataclass
@@ -124,7 +127,7 @@ def estimate_nurse_shift_capacity(
     if shift == "N":
         if is_night_keep(nurse):
             return min(capacity, NIGHT_KEEP_MONTHLY_N_TARGET)
-        return min(capacity, nurse.max_nights_per_month)
+        return min(capacity, min(nurse.max_nights_per_month, NON_NIGHT_KEEP_MAX_NIGHTS_PER_MONTH))
     return capacity
 
 
@@ -181,7 +184,7 @@ def generate_schedule(config: SchedulerConfig, nurses: list[Nurse]) -> Generated
     add_objective(model, shift_vars, config, nurses, dates)
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 20.0
+    solver.parameters.max_time_in_seconds = 60.0
     solver.parameters.num_search_workers = 8
     solver.parameters.random_seed = config.random_seed
 
@@ -211,17 +214,7 @@ def apply_fixed_assignments(
     dates: list[date],
     nurse_index: dict[str, int],
 ) -> None:
-    day_center_idx = nurse_index[config.center_day_nurse_id]
-    evening_center_idx = nurse_index[config.center_evening_nurse_id]
-    nurse_by_id = {nurse.nurse_id: nurse for nurse in nurses}
-    day_center_off_days = parse_wanted_off_days(nurse_by_id[config.center_day_nurse_id].wanted_off)
-    evening_center_off_days = parse_wanted_off_days(nurse_by_id[config.center_evening_nurse_id].wanted_off)
-    for day_idx, current in enumerate(dates):
-        if current.weekday() < 5:
-            if current.day not in day_center_off_days:
-                model.Add(shift_vars[(day_center_idx, day_idx, "D")] == 1)
-            if current.day not in evening_center_off_days:
-                model.Add(shift_vars[(evening_center_idx, day_idx, "E")] == 1)
+    del model, shift_vars, config, nurses, dates, nurse_index
 
 
 def apply_hard_constraints(
@@ -243,7 +236,7 @@ def apply_hard_constraints(
         if is_night_keep(nurse):
             model.Add(sum(n_vars) == NIGHT_KEEP_MONTHLY_N_TARGET)
         else:
-            model.Add(sum(n_vars) <= nurse.max_nights_per_month)
+            model.Add(sum(n_vars) <= min(nurse.max_nights_per_month, NON_NIGHT_KEEP_MAX_NIGHTS_PER_MONTH))
 
         for day_idx, current in enumerate(dates):
             if wanted_off_days and current.day in wanted_off_days:
@@ -254,6 +247,11 @@ def apply_hard_constraints(
                         model.Add(shift_vars[(nurse_idx, day_idx, shift)] == 0)
 
         work_vars = [sum(shift_vars[(nurse_idx, day_idx, shift)] for shift in WORK_SHIFTS) for day_idx in range(total_days)]
+        if nurse.nurse_id not in {config.center_day_nurse_id, config.center_evening_nurse_id}:
+            model.Add(sum(work_vars) <= total_days - MIN_OFF_DAYS_PER_MONTH)
+
+        for shift in allowed_shift_types:
+            model.Add(sum(shift_vars[(nurse_idx, day_idx, shift)] for day_idx in range(total_days)) >= 1)
 
         for start in range(total_days - 5):
             model.Add(sum(work_vars[start : start + 6]) <= nurse.max_consecutive_work_days)
@@ -449,6 +447,7 @@ def add_objective(
 ) -> None:
     total_days = len(dates)
     day_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_day_nurse_id))
+    evening_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_evening_nurse_id))
     fairness_penalties: list[cp_model.IntVar] = []
     assignment_penalties: list[cp_model.IntVar] = []
     team_cover_penalties: list[cp_model.IntVar] = []
@@ -478,6 +477,26 @@ def add_objective(
                             shift_vars[(nurse_idx, day_idx, "D")],
                             E_TEAM_LEVEL3_D_PENALTY,
                             f"e_team_lvl3_d_{nurse_idx}_{day_idx}",
+                        )
+                    )
+
+            if nurse.nurse_id == config.center_day_nurse_id and dates[day_idx].weekday() < 5 and dates[day_idx].day not in day_center_off_days:
+                assignment_penalties.append(
+                    _weighted_term(
+                        model,
+                        shift_vars[(nurse_idx, day_idx, "O")],
+                        CENTER_WEEKDAY_OFF_PENALTY,
+                        f"center_day_weekday_off_{nurse_idx}_{day_idx}",
+                    )
+                )
+            if nurse.nurse_id == config.center_evening_nurse_id and dates[day_idx].weekday() < 5:
+                if dates[day_idx].day not in evening_center_off_days:
+                    assignment_penalties.append(
+                        _weighted_term(
+                            model,
+                            shift_vars[(nurse_idx, day_idx, "O")],
+                            CENTER_WEEKDAY_OFF_PENALTY,
+                            f"center_evening_weekday_off_{nurse_idx}_{day_idx}",
                         )
                     )
 
