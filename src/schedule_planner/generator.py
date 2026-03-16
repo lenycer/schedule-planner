@@ -9,7 +9,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised in dependency-missing environments
     cp_model = None
 
-from .models import DayRequirement, Nurse, SchedulerConfig, parse_allowed_shift_types, parse_wanted_off_days
+from .models import DayRequirement, Nurse, SchedulerConfig, is_night_keep, parse_allowed_shift_types, parse_wanted_off_days
 from .rules import (
     FIVE_STREAK_PENALTY,
     E_TEAM_LEVEL3_D_PENALTY,
@@ -21,6 +21,7 @@ from .rules import (
 
 SHIFTS = ("D", "E", "N", "O", "P")
 WORK_SHIFTS = ("D", "E", "N", "P")
+NIGHT_KEEP_MONTHLY_N_TARGET = 15
 
 
 @dataclass
@@ -136,7 +137,10 @@ def apply_hard_constraints(
         allowed_shift_types = parse_allowed_shift_types(nurse.allowed_shift_types)
         wanted_off_days = parse_wanted_off_days(nurse.wanted_off)
         n_vars = [shift_vars[(nurse_idx, day_idx, "N")] for day_idx in range(total_days)]
-        model.Add(sum(n_vars) <= nurse.max_nights_per_month)
+        if is_night_keep(nurse):
+            model.Add(sum(n_vars) == NIGHT_KEEP_MONTHLY_N_TARGET)
+        else:
+            model.Add(sum(n_vars) <= nurse.max_nights_per_month)
 
         for day_idx, current in enumerate(dates):
             if wanted_off_days and current.day in wanted_off_days:
@@ -215,6 +219,18 @@ def apply_hard_constraints(
 
         if nurse.competency_level == 1:
             for day_idx in range(total_days):
+                model.Add(shift_vars[(nurse_idx, day_idx, "P")] == 0)
+
+        if nurse.nurse_id == config.center_day_nurse_id:
+            for day_idx in range(total_days):
+                model.Add(shift_vars[(nurse_idx, day_idx, "E")] == 0)
+                model.Add(shift_vars[(nurse_idx, day_idx, "N")] == 0)
+                model.Add(shift_vars[(nurse_idx, day_idx, "P")] == 0)
+
+        if nurse.nurse_id == config.center_evening_nurse_id:
+            for day_idx in range(total_days):
+                model.Add(shift_vars[(nurse_idx, day_idx, "D")] == 0)
+                model.Add(shift_vars[(nurse_idx, day_idx, "N")] == 0)
                 model.Add(shift_vars[(nurse_idx, day_idx, "P")] == 0)
 
         if nurse.team == "E":

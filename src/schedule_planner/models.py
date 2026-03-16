@@ -46,6 +46,10 @@ def parse_allowed_shift_types(raw: str) -> set[str]:
     return {code for code in normalized if code in WORK_SHIFTS}
 
 
+def is_night_keep(nurse: Nurse) -> bool:
+    return parse_allowed_shift_types(nurse.allowed_shift_types) == {"N"}
+
+
 def parse_wanted_off_days(raw: str) -> set[int]:
     raw = raw or ""
     if not raw.strip():

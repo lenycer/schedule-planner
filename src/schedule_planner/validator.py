@@ -3,8 +3,11 @@ from __future__ import annotations
 from collections import Counter
 
 from .generator import GeneratedSchedule, build_requirements
-from .models import Nurse, SchedulerConfig, WORK_SHIFTS, parse_allowed_shift_types, parse_wanted_off_days
+from .models import Nurse, SchedulerConfig, WORK_SHIFTS, is_night_keep, parse_allowed_shift_types, parse_wanted_off_days
 from .rules import calculate_soft_penalty, allows_five_streak_exception, weekly_hours
+
+
+NIGHT_KEEP_MONTHLY_N_TARGET = 15
 
 
 def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: SchedulerConfig) -> list[str]:
@@ -48,6 +51,7 @@ def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: 
             elif schedule.assignments[config.center_evening_nurse_id][day_index] != "E":
                 violations.append(f"{current.isoformat()} 이브 중앙 근무자 미배정")
 
+    violations.extend(validate_center_assignments(schedule, config))
     return violations
 
 
@@ -56,7 +60,12 @@ def validate_nurse_row(nurse: Nurse, row: list[str], dates: list) -> list[str]:
     night_count = row.count("N")
     allowed_shift_types = parse_allowed_shift_types(nurse.allowed_shift_types)
     wanted_off_days = parse_wanted_off_days(nurse.wanted_off)
-    if night_count > nurse.max_nights_per_month:
+    if is_night_keep(nurse):
+        if night_count != NIGHT_KEEP_MONTHLY_N_TARGET:
+            violations.append(f"{nurse.nurse_id} night keep 월간 N 고정 수량 불일치: {night_count}")
+        if any(code not in {"N", "O"} for code in row):
+            violations.append(f"{nurse.nurse_id} night keep N/O 외 근무 배정")
+    elif night_count > nurse.max_nights_per_month:
         violations.append(f"{nurse.nurse_id} 월간 N 초과: {night_count}")
 
     consecutive_work = 0
@@ -261,5 +270,22 @@ def validate_day_team_and_competency(
                 violations.append(f"{day.isoformat()} {nurse.nurse_id} E팀 주말 E 역량3 필요")
             if day.weekday() < 5 and day.day in evening_center_off_days and code == "E" and nurse.competency_level != 3:
                 violations.append(f"{day.isoformat()} {nurse.nurse_id} E팀 평일 E 중앙 대체 역량3 필요")
+
+    return violations
+
+
+def validate_center_assignments(
+    schedule: GeneratedSchedule,
+    config: SchedulerConfig,
+) -> list[str]:
+    violations: list[str] = []
+    for day_index, day in enumerate(schedule.dates):
+        day_center_code = schedule.assignments[config.center_day_nurse_id][day_index]
+        if day_center_code not in {"D", "O"}:
+            violations.append(f"{day.isoformat()} 데이 중앙 근무자 D/O 외 배정: {day_center_code}")
+
+        evening_center_code = schedule.assignments[config.center_evening_nurse_id][day_index]
+        if evening_center_code not in {"E", "O"}:
+            violations.append(f"{day.isoformat()} 이브 중앙 근무자 E/O 외 배정: {evening_center_code}")
 
     return violations

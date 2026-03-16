@@ -49,6 +49,55 @@ class ValidatorTest(unittest.TestCase):
 
         self.assertEqual(penalty, 10000)
 
+    def test_validate_schedule_detects_night_keep_non_night_assignment_and_wrong_monthly_total(self) -> None:
+        nurse = Nurse("N001", "김하린", allowed_shift_types="N")
+        violations = validate_schedule(
+            GeneratedSchedule(
+                dates=build_month_dates(2026, 4)[:15],
+                assignments={"N001": ["N"] * 14 + ["D"]},
+                hard_violations=[],
+                soft_penalty=0,
+            ),
+            [nurse],
+            SchedulerConfig(
+                year=2026,
+                month=4,
+                nurse_count=1,
+                center_day_nurse_id="N001",
+                center_evening_nurse_id="N001",
+            ),
+        )
+
+        self.assertTrue(any("night keep 월간 N 고정 수량 불일치" in violation for violation in violations))
+        self.assertTrue(any("night keep N/O 외 근무 배정" in violation for violation in violations))
+
+    def test_validate_schedule_detects_invalid_center_assignment_types(self) -> None:
+        violations = validate_schedule(
+            GeneratedSchedule(
+                dates=build_month_dates(2026, 4)[:2],
+                assignments={
+                    "N001": ["P", "D"],
+                    "N002": ["E", "P"],
+                },
+                hard_violations=[],
+                soft_penalty=0,
+            ),
+            [
+                Nurse("N001", "김하린", team="CENTER", competency_level=3),
+                Nurse("N002", "이서윤", team="CENTER", competency_level=3),
+            ],
+            SchedulerConfig(
+                year=2026,
+                month=4,
+                nurse_count=2,
+                center_day_nurse_id="N001",
+                center_evening_nurse_id="N002",
+            ),
+        )
+
+        self.assertTrue(any("데이 중앙 근무자 D/O 외 배정" in violation for violation in violations))
+        self.assertTrue(any("이브 중앙 근무자 E/O 외 배정" in violation for violation in violations))
+
     def test_validate_schedule_detects_forbidden_patterns(self) -> None:
         nurses = [
             Nurse("N001", "김하린"),
