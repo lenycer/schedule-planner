@@ -22,7 +22,9 @@ from .rules import (
 SHIFTS = ("D", "E", "N", "O", "P")
 WORK_SHIFTS = ("D", "E", "N", "P")
 NIGHT_KEEP_MONTHLY_N_TARGET = 15
-TEAM_DAILY_COVER_PENALTY = 3
+TEAM_DAILY_COVER_PENALTY = 15
+DE_MIN_EACH_SHIFT_SOFT = 5
+DE_BALANCE_PENALTY = 50
 MIN_OFF_DAYS_PER_MONTH = 10
 CENTER_WEEKDAY_OFF_PENALTY = 20
 NON_NIGHT_KEEP_MAX_NIGHTS_PER_MONTH = 7
@@ -190,7 +192,10 @@ def generate_schedule(config: SchedulerConfig, nurses: list[Nurse]) -> Generated
 
     status = solver.Solve(model)
     if status not in {cp_model.OPTIMAL, cp_model.FEASIBLE}:
-        raise RuntimeError("유효한 스케줄을 생성하지 못했습니다. 설정 또는 인원 수를 조정하세요.")
+        status_name = {0: "UNKNOWN", 1: "MODEL_INVALID", 3: "INFEASIBLE"}.get(
+            status.value if hasattr(status, "value") else status, str(status)
+        )
+        raise RuntimeError(f"유효한 스케줄을 생성하지 못했습니다. (status={status_name}) 설정 또는 인원 수를 조정하세요.")
 
     assignments: dict[str, list[str]] = {}
     for nurse_idx, nurse in enumerate(nurses):
@@ -353,16 +358,17 @@ def apply_hard_constraints(
                 day_center_off_days,
                 evening_center_off_days,
             )
-            if team_capacity >= total_days:
-                model.Add(
-                    sum(
-                        shift_vars[(nurse_idx, day_idx, shift)]
-                        for nurse_idx, nurse in enumerate(nurses)
-                        if nurse.team == team
-                        for day_idx in range(total_days)
-                    )
-                    >= total_days
+            if team_capacity < total_days:
+                continue
+            model.Add(
+                sum(
+                    shift_vars[(nurse_idx, day_idx, shift)]
+                    for nurse_idx, nurse in enumerate(nurses)
+                    if nurse.team == team
+                    for day_idx in range(total_days)
                 )
+                >= total_days
+            )
 
     for day_idx in range(total_days):
 
@@ -512,6 +518,30 @@ def add_objective(
                         f"{shift.lower()}_streak_{nurse_idx}_{start}",
                     )
                 )
+
+    for nurse_idx, nurse in enumerate(nurses):
+        allowed_shift_types = parse_allowed_shift_types(nurse.allowed_shift_types)
+        if allowed_shift_types == {"D", "E"} and nurse.team in regular_team_names:
+            team_d_count = sum(
+                1 for n in nurses
+                if n.team == nurse.team
+                and "D" in (parse_allowed_shift_types(n.allowed_shift_types) or set(WORK_SHIFTS))
+            )
+            team_e_count = sum(
+                1 for n in nurses
+                if n.team == nurse.team
+                and "E" in (parse_allowed_shift_types(n.allowed_shift_types) or set(WORK_SHIFTS))
+            )
+            if team_d_count <= 2 or team_e_count <= 2:
+                continue
+            for shift in ("D", "E"):
+                shift_total = model.NewIntVar(0, total_days, f"de_total_{nurse_idx}_{shift}")
+                model.Add(shift_total == sum(shift_vars[(nurse_idx, day_idx, shift)] for day_idx in range(total_days)))
+                shortfall = model.NewIntVar(0, DE_MIN_EACH_SHIFT_SOFT, f"de_shortfall_{nurse_idx}_{shift}")
+                model.AddMaxEquality(shortfall, [DE_MIN_EACH_SHIFT_SOFT - shift_total, model.NewConstant(0)])
+                weighted = model.NewIntVar(0, DE_MIN_EACH_SHIFT_SOFT * DE_BALANCE_PENALTY, f"de_penalty_{nurse_idx}_{shift}")
+                model.Add(weighted == shortfall * DE_BALANCE_PENALTY)
+                assignment_penalties.append(weighted)
 
     for day_idx in range(total_days):
         for shift in ("D", "E", "N"):

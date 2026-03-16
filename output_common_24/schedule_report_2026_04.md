@@ -1,8 +1,8 @@
 # Schedule Report 2026-04
 
 ## Result
-- Hard constraint violations (validated): 0
-- Soft penalty (patterns + P assignment preference + fairness): 10109
+- Hard constraint violations (validated): 2
+- Soft penalty (patterns + P assignment preference + fairness): 10110
 - Nurse count: 24
 
 ## Central Nurses
@@ -15,25 +15,25 @@
 | N001 | 0 | 5 | 0 |
 | N002 | 0 | 5 | 0 |
 | N003 | 15 | 3 | 0 |
-| N004 | 6 | 4 | 0 |
-| N005 | 7 | 4 | 0 |
-| N006 | 7 | 5 | 0 |
-| N007 | 0 | 5 | 0 |
+| N004 | 7 | 5 | 0 |
+| N005 | 7 | 5 | 0 |
+| N006 | 6 | 5 | 0 |
+| N007 | 0 | 4 | 0 |
 | N008 | 7 | 4 | 0 |
-| N009 | 7 | 5 | 0 |
+| N009 | 7 | 4 | 0 |
 | N010 | 7 | 5 | 0 |
 | N011 | 7 | 5 | 0 |
-| N012 | 0 | 4 | 0 |
+| N012 | 0 | 5 | 0 |
 | N013 | 15 | 3 | 0 |
 | N014 | 7 | 5 | 0 |
-| N015 | 7 | 3 | 0 |
-| N016 | 7 | 5 | 0 |
+| N015 | 7 | 4 | 0 |
+| N016 | 7 | 4 | 0 |
 | N017 | 0 | 4 | 0 |
 | N018 | 7 | 5 | 0 |
 | N019 | 0 | 4 | 0 |
 | N020 | 0 | 5 | 0 |
 | N021 | 7 | 5 | 0 |
-| N022 | 7 | 5 | 0 |
+| N022 | 7 | 4 | 0 |
 | N023 | 0 | 5 | 10000 |
 | N024 | 0 | 4 | 0 |
 
@@ -72,4 +72,5 @@
 | 2026-04-30 | 6 | 5 | 4 | 1 | 8 |
 
 ## Violations
-- none
+- N012 DE 근무자 E 최소 권장 미달: 4
+- N019 DE 근무자 E 최소 권장 미달: 2

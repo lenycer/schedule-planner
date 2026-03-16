@@ -11,6 +11,7 @@ from .rules import calculate_soft_penalty, allows_five_streak_exception, weekly_
 NIGHT_KEEP_MONTHLY_N_TARGET = 15
 MIN_OFF_DAYS_PER_MONTH = 10
 NON_NIGHT_KEEP_MAX_NIGHTS_PER_MONTH = 7
+DE_MIN_EACH_SHIFT_SOFT = 5
 
 
 def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: SchedulerConfig) -> list[str]:
@@ -43,6 +44,7 @@ def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: 
 
     violations.extend(validate_center_assignments(schedule, config))
     violations.extend(validate_monthly_team_coverage(schedule, nurses, config))
+    violations.extend(validate_de_balance(schedule, nurses))
     return violations
 
 
@@ -322,4 +324,35 @@ def validate_monthly_team_coverage(
                     f"{team}팀 월간 {shift} 커버 부족: expected>={total_days}, actual={actual}"
                 )
 
+    return violations
+
+
+def validate_de_balance(
+    schedule: GeneratedSchedule,
+    nurses: list[Nurse],
+) -> list[str]:
+    violations: list[str] = []
+    regular_teams = {"A", "B", "C", "D"}
+    for nurse in nurses:
+        allowed = parse_allowed_shift_types(nurse.allowed_shift_types)
+        if allowed != {"D", "E"} or nurse.team not in regular_teams:
+            continue
+        team_d_count = sum(
+            1 for n in nurses
+            if n.team == nurse.team
+            and "D" in (parse_allowed_shift_types(n.allowed_shift_types) or {"D", "E", "N", "P"})
+        )
+        team_e_count = sum(
+            1 for n in nurses
+            if n.team == nurse.team
+            and "E" in (parse_allowed_shift_types(n.allowed_shift_types) or {"D", "E", "N", "P"})
+        )
+        if team_d_count <= 2 or team_e_count <= 2:
+            continue
+        row = schedule.assignments[nurse.nurse_id]
+        for shift in ("D", "E"):
+            if row.count(shift) < DE_MIN_EACH_SHIFT_SOFT:
+                violations.append(
+                    f"{nurse.nurse_id} DE 근무자 {shift} 최소 권장 미달: {row.count(shift)}"
+                )
     return violations
