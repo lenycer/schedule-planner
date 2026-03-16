@@ -22,6 +22,7 @@ from .rules import (
 SHIFTS = ("D", "E", "N", "O", "P")
 WORK_SHIFTS = ("D", "E", "N", "P")
 NIGHT_KEEP_MONTHLY_N_TARGET = 15
+TEAM_DAILY_COVER_PENALTY = 3
 
 
 @dataclass
@@ -46,6 +47,108 @@ def build_requirements(dates: list[date]) -> list[DayRequirement]:
             demand = {"D": 4, "E": 5, "N": 4, "P": 1}
         requirements.append(DayRequirement(day=current, demand=demand))
     return requirements
+
+
+def can_work_shift_on_day(
+    nurse: Nurse,
+    shift: str,
+    current: date,
+    config: SchedulerConfig,
+    day_center_off_days: set[int],
+    evening_center_off_days: set[int],
+) -> bool:
+    if shift == "O":
+        return True
+    if current.day in parse_wanted_off_days(nurse.wanted_off):
+        return False
+
+    allowed_shift_types = parse_allowed_shift_types(nurse.allowed_shift_types)
+    if allowed_shift_types and shift not in allowed_shift_types:
+        return False
+
+    if nurse.competency_level == 1 and shift == "P":
+        return False
+
+    if nurse.nurse_id == config.center_day_nurse_id:
+        return shift == "D" and (current.weekday() < 5 and current.day not in day_center_off_days)
+
+    if nurse.nurse_id == config.center_evening_nurse_id:
+        return shift == "E" and (current.weekday() < 5 and current.day not in evening_center_off_days)
+
+    if nurse.team == "E":
+        if shift == "N":
+            return False
+        if shift == "E":
+            if current.weekday() >= 5:
+                return nurse.competency_level == 3
+            return current.day in evening_center_off_days and nurse.competency_level == 3
+
+    return True
+
+
+def max_assignable_days_in_segment(length: int, max_consecutive_work_days: int) -> int:
+    if length <= 0:
+        return 0
+    cycle = max_consecutive_work_days + 1
+    full_cycles, remainder = divmod(length, cycle)
+    return full_cycles * max_consecutive_work_days + min(remainder, max_consecutive_work_days)
+
+
+def estimate_nurse_shift_capacity(
+    nurse: Nurse,
+    shift: str,
+    dates: list[date],
+    config: SchedulerConfig,
+    day_center_off_days: set[int],
+    evening_center_off_days: set[int],
+) -> int:
+    eligible_days = [
+        can_work_shift_on_day(
+            nurse,
+            shift,
+            current,
+            config,
+            day_center_off_days,
+            evening_center_off_days,
+        )
+        for current in dates
+    ]
+    capacity = 0
+    current_segment = 0
+    for eligible in eligible_days + [False]:
+        if eligible:
+            current_segment += 1
+            continue
+        capacity += max_assignable_days_in_segment(current_segment, nurse.max_consecutive_work_days)
+        current_segment = 0
+    if shift == "N":
+        if is_night_keep(nurse):
+            return min(capacity, NIGHT_KEEP_MONTHLY_N_TARGET)
+        return min(capacity, nurse.max_nights_per_month)
+    return capacity
+
+
+def estimate_team_shift_capacity(
+    nurses: list[Nurse],
+    team: str,
+    shift: str,
+    dates: list[date],
+    config: SchedulerConfig,
+    day_center_off_days: set[int],
+    evening_center_off_days: set[int],
+) -> int:
+    return sum(
+        estimate_nurse_shift_capacity(
+            nurse,
+            shift,
+            dates,
+            config,
+            day_center_off_days,
+            evening_center_off_days,
+        )
+        for nurse in nurses
+        if nurse.team == team
+    )
 
 
 def generate_schedule(config: SchedulerConfig, nurses: list[Nurse]) -> GeneratedSchedule:
@@ -241,17 +344,29 @@ def apply_hard_constraints(
                 elif nurse.competency_level != 3:
                     model.Add(shift_vars[(nurse_idx, day_idx, "E")] == 0)
 
-    for day_idx in range(total_days):
+    for team in regular_team_names:
         for shift in ("D", "E", "N"):
-            for team in regular_team_names:
+            team_capacity = estimate_team_shift_capacity(
+                nurses,
+                team,
+                shift,
+                dates,
+                config,
+                day_center_off_days,
+                evening_center_off_days,
+            )
+            if team_capacity >= total_days:
                 model.Add(
                     sum(
                         shift_vars[(nurse_idx, day_idx, shift)]
                         for nurse_idx, nurse in enumerate(nurses)
                         if nurse.team == team
+                        for day_idx in range(total_days)
                     )
-                    >= 1
+                    >= total_days
                 )
+
+    for day_idx in range(total_days):
 
         if dates[day_idx].weekday() >= 5:
             model.Add(
@@ -336,6 +451,8 @@ def add_objective(
     day_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_day_nurse_id))
     fairness_penalties: list[cp_model.IntVar] = []
     assignment_penalties: list[cp_model.IntVar] = []
+    team_cover_penalties: list[cp_model.IntVar] = []
+    regular_team_names = sorted({nurse.team for nurse in nurses if nurse.team in {"A", "B", "C", "D"}})
 
     for nurse_idx, _ in enumerate(nurses):
         n_total = model.NewIntVar(0, total_days, f"n_total_{nurse_idx}")
@@ -377,9 +494,30 @@ def add_objective(
                     )
                 )
 
+    for day_idx in range(total_days):
+        for shift in ("D", "E", "N"):
+            for team in regular_team_names:
+                team_count = sum(
+                    shift_vars[(nurse_idx, day_idx, shift)]
+                    for nurse_idx, nurse in enumerate(nurses)
+                    if nurse.team == team
+                )
+                missing_team_shift = model.NewBoolVar(f"missing_{team}_{shift}_{day_idx}")
+                model.Add(team_count == 0).OnlyEnforceIf(missing_team_shift)
+                model.Add(team_count >= 1).OnlyEnforceIf(missing_team_shift.Not())
+                team_cover_penalties.append(
+                    _weighted_term(
+                        model,
+                        missing_team_shift,
+                        TEAM_DAILY_COVER_PENALTY,
+                        f"missing_{team}_{shift}_{day_idx}",
+                    )
+                )
+
     model.Minimize(
         sum(assignment_penalties)
         + sum(fairness_penalties)
+        + sum(team_cover_penalties)
     )
 
 

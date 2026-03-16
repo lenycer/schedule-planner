@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from .generator import GeneratedSchedule, build_requirements
+from .generator import GeneratedSchedule, build_requirements, estimate_team_shift_capacity
 from .models import Nurse, SchedulerConfig, WORK_SHIFTS, is_night_keep, parse_allowed_shift_types, parse_wanted_off_days
 from .rules import calculate_soft_penalty, allows_five_streak_exception, weekly_hours
 
@@ -52,6 +52,7 @@ def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: 
                 violations.append(f"{current.isoformat()} 이브 중앙 근무자 미배정")
 
     violations.extend(validate_center_assignments(schedule, config))
+    violations.extend(validate_monthly_team_coverage(schedule, nurses, config))
     return violations
 
 
@@ -194,17 +195,6 @@ def validate_day_team_and_competency(
     evening_center_off_days: set[int],
 ) -> list[str]:
     violations: list[str] = []
-    team_names = sorted({nurse.team for nurse in nurses if nurse.team in {"A", "B", "C", "D"}})
-    for shift in ("D", "E", "N"):
-        for team in team_names:
-            count = sum(
-                1
-                for nurse in nurses
-                if nurse.team == team and schedule.assignments[nurse.nurse_id][day_index] == shift
-            )
-            if count == 0:
-                violations.append(f"{day.isoformat()} {team} {shift} 미배정")
-
     e_team_evening_total = sum(
         1
         for nurse in nurses
@@ -287,5 +277,43 @@ def validate_center_assignments(
         evening_center_code = schedule.assignments[config.center_evening_nurse_id][day_index]
         if evening_center_code not in {"E", "O"}:
             violations.append(f"{day.isoformat()} 이브 중앙 근무자 E/O 외 배정: {evening_center_code}")
+
+    return violations
+
+
+def validate_monthly_team_coverage(
+    schedule: GeneratedSchedule,
+    nurses: list[Nurse],
+    config: SchedulerConfig,
+) -> list[str]:
+    violations: list[str] = []
+    total_days = len(schedule.dates)
+    day_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_day_nurse_id))
+    evening_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_evening_nurse_id))
+
+    for team in sorted({nurse.team for nurse in nurses if nurse.team in {"A", "B", "C", "D"}}):
+        for shift in ("D", "E", "N"):
+            capacity = estimate_team_shift_capacity(
+                nurses,
+                team,
+                shift,
+                schedule.dates,
+                config,
+                day_center_off_days,
+                evening_center_off_days,
+            )
+            if capacity < total_days:
+                continue
+            actual = sum(
+                1
+                for nurse in nurses
+                if nurse.team == team
+                for code in schedule.assignments[nurse.nurse_id]
+                if code == shift
+            )
+            if actual < total_days:
+                violations.append(
+                    f"{team}팀 월간 {shift} 커버 부족: expected>={total_days}, actual={actual}"
+                )
 
     return violations

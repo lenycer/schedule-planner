@@ -98,6 +98,61 @@ class ValidatorTest(unittest.TestCase):
         self.assertTrue(any("데이 중앙 근무자 D/O 외 배정" in violation for violation in violations))
         self.assertTrue(any("이브 중앙 근무자 E/O 외 배정" in violation for violation in violations))
 
+    def test_validate_schedule_detects_monthly_team_coverage_shortfall_when_capacity_is_sufficient(self) -> None:
+        nurses = [
+            Nurse("N001", "센터D", team="CENTER", competency_level=3),
+            Nurse("N002", "센터E", team="CENTER", competency_level=3),
+            Nurse("N003", "A1", team="A", competency_level=3, allowed_shift_types="DE"),
+            Nurse("N004", "A2", team="A", competency_level=2, allowed_shift_types="DE"),
+            Nurse("N005", "A3", team="A", competency_level=2, allowed_shift_types="DE"),
+            Nurse("N006", "A4", team="A", competency_level=2, allowed_shift_types="DE"),
+            Nurse("N007", "A5", team="A", competency_level=2, allowed_shift_types="DE"),
+        ]
+        dates = build_month_dates(2026, 4)
+        assignments = {nurse.nurse_id: ["O"] * len(dates) for nurse in nurses}
+        assignments["N003"] = ["D"] * len(dates)
+
+        violations = validate_schedule(
+            GeneratedSchedule(dates=dates, assignments=assignments, hard_violations=[], soft_penalty=0),
+            nurses,
+            SchedulerConfig(
+                year=2026,
+                month=4,
+                nurse_count=len(nurses),
+                center_day_nurse_id="N001",
+                center_evening_nurse_id="N002",
+            ),
+        )
+
+        self.assertTrue(any("A팀 월간 E 커버 부족" in violation for violation in violations))
+
+    def test_validate_schedule_skips_monthly_team_coverage_when_capacity_is_insufficient(self) -> None:
+        nurses = [
+            Nurse("N001", "센터D", team="CENTER", competency_level=3),
+            Nurse("N002", "센터E", team="CENTER", competency_level=3),
+            Nurse("N003", "A1", team="A", competency_level=3, allowed_shift_types="N"),
+            Nurse("N004", "A2", team="A", competency_level=2, allowed_shift_types="EN"),
+            Nurse("N005", "A3", team="A", competency_level=2, allowed_shift_types="EN"),
+            Nurse("N006", "A4", team="A", competency_level=2, allowed_shift_types="EN"),
+            Nurse("N007", "A5", team="A", competency_level=2, allowed_shift_types="DE"),
+        ]
+        dates = build_month_dates(2026, 4)
+        assignments = {nurse.nurse_id: ["O"] * len(dates) for nurse in nurses}
+
+        violations = validate_schedule(
+            GeneratedSchedule(dates=dates, assignments=assignments, hard_violations=[], soft_penalty=0),
+            nurses,
+            SchedulerConfig(
+                year=2026,
+                month=4,
+                nurse_count=len(nurses),
+                center_day_nurse_id="N001",
+                center_evening_nurse_id="N002",
+            ),
+        )
+
+        self.assertFalse(any("A팀 월간 D 커버 부족" in violation for violation in violations))
+
     def test_validate_schedule_detects_forbidden_patterns(self) -> None:
         nurses = [
             Nurse("N001", "김하린"),
