@@ -7,6 +7,8 @@ from pathlib import Path
 from .generator import generate_schedule
 from .io_utils import load_config, load_nurses, write_nurse_pool
 from .reporter import write_report_md, write_schedule_csv
+from .rules import calculate_schedule_soft_penalty
+from .validator import validate_schedule
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,6 +35,18 @@ def main() -> None:
     write_nurse_pool(output_dir / "nurse_pool_resolved.csv", nurses)
 
     schedule = generate_schedule(config, nurses)
+    violations = validate_schedule(schedule, nurses, config)
+    schedule = replace(
+        schedule,
+        hard_violations=violations,
+        soft_penalty=calculate_schedule_soft_penalty(
+            schedule.assignments,
+            nurses,
+            schedule.dates,
+            config.center_day_nurse_id,
+            config.center_evening_nurse_id,
+        ),
+    )
 
     schedule_csv = output_dir / f"monthly_schedule_{config.year:04d}_{config.month:02d}.csv"
     report_md = output_dir / f"schedule_report_{config.year:04d}_{config.month:02d}.md"

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .generator import GeneratedSchedule, build_requirements
 from .io_utils import CSV_ENCODING
-from .models import Nurse, SchedulerConfig
+from .models import Nurse, SchedulerConfig, parse_wanted_off_days
 from .validator import summarize_schedule
 
 
@@ -21,8 +21,9 @@ def format_team(team: str) -> str:
     return team
 
 
-def format_assignment(code: str, nurse: Nurse) -> str:
-    return f"{code} ({nurse.competency_level} {format_team(nurse.team)})"
+def format_assignment(code: str, nurse: Nurse, day) -> str:
+    display_code = "W-O" if code == "O" and day.day in parse_wanted_off_days(nurse.wanted_off) else code
+    return f"{display_code} ({nurse.competency_level} {format_team(nurse.team)})"
 
 
 def write_schedule_csv(path: str | Path, schedule: GeneratedSchedule, nurses: list[Nurse]) -> None:
@@ -45,7 +46,7 @@ def write_schedule_csv(path: str | Path, schedule: GeneratedSchedule, nurses: li
                 [
                     nurse.nurse_id,
                     nurse.name,
-                    *[format_assignment(code, nurse) for code in row],
+                    *[format_assignment(code, nurse, schedule.dates[index]) for index, code in enumerate(row)],
                     row.count("D"),
                     row.count("E"),
                     row.count("N"),
@@ -86,14 +87,14 @@ def write_report_md(
     nurses: list[Nurse],
     config: SchedulerConfig,
 ) -> None:
-    summary = summarize_schedule(schedule, nurses)
+    summary = summarize_schedule(schedule, nurses, config)
     requirements = build_requirements(schedule.dates)
     lines = [
         f"# Schedule Report {config.year:04d}-{config.month:02d}",
         "",
         "## Result",
-        f"- Hard constraint violations: {0 if not schedule.hard_violations else len(schedule.hard_violations)}",
-        f"- Soft penalty: {schedule.soft_penalty}",
+        f"- Hard constraint violations (validated): {0 if not schedule.hard_violations else len(schedule.hard_violations)}",
+        f"- Soft penalty (patterns + P assignment preference + fairness): {schedule.soft_penalty}",
         f"- Nurse count: {len(nurses)}",
         "",
         "## Central Nurses",

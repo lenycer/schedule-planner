@@ -4,9 +4,19 @@ import calendar
 from dataclasses import dataclass
 from datetime import date
 
-from ortools.sat.python import cp_model
+try:
+    from ortools.sat.python import cp_model
+except ModuleNotFoundError:  # pragma: no cover - exercised in dependency-missing environments
+    cp_model = None
 
-from .models import DayRequirement, Nurse, SchedulerConfig
+from .models import DayRequirement, Nurse, SchedulerConfig, parse_allowed_shift_types, parse_wanted_off_days
+from .rules import (
+    FIVE_STREAK_PENALTY,
+    E_TEAM_LEVEL3_D_PENALTY,
+    E_TEAM_LEVEL3_P_PENALTY,
+    NON_E_TEAM_P_PENALTY,
+    build_fairness_penalty,
+)
 
 
 SHIFTS = ("D", "E", "N", "O", "P")
@@ -38,6 +48,9 @@ def build_requirements(dates: list[date]) -> list[DayRequirement]:
 
 
 def generate_schedule(config: SchedulerConfig, nurses: list[Nurse]) -> GeneratedSchedule:
+    if cp_model is None:
+        raise RuntimeError("ortools 가 설치되지 않아 스케줄을 생성할 수 없습니다. `pip install -r requirements.txt` 를 먼저 실행하세요.")
+
     dates = build_month_dates(config.year, config.month)
     requirements = build_requirements(dates)
     model = cp_model.CpModel()
@@ -61,7 +74,7 @@ def generate_schedule(config: SchedulerConfig, nurses: list[Nurse]) -> Generated
 
     apply_fixed_assignments(model, shift_vars, config, nurses, dates, nurse_index)
     apply_hard_constraints(model, shift_vars, config, nurses, dates)
-    add_objective(model, shift_vars, nurses, dates)
+    add_objective(model, shift_vars, config, nurses, dates)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 20.0
@@ -96,10 +109,15 @@ def apply_fixed_assignments(
 ) -> None:
     day_center_idx = nurse_index[config.center_day_nurse_id]
     evening_center_idx = nurse_index[config.center_evening_nurse_id]
+    nurse_by_id = {nurse.nurse_id: nurse for nurse in nurses}
+    day_center_off_days = parse_wanted_off_days(nurse_by_id[config.center_day_nurse_id].wanted_off)
+    evening_center_off_days = parse_wanted_off_days(nurse_by_id[config.center_evening_nurse_id].wanted_off)
     for day_idx, current in enumerate(dates):
         if current.weekday() < 5:
-            model.Add(shift_vars[(day_center_idx, day_idx, "D")] == 1)
-            model.Add(shift_vars[(evening_center_idx, day_idx, "E")] == 1)
+            if current.day not in day_center_off_days:
+                model.Add(shift_vars[(day_center_idx, day_idx, "D")] == 1)
+            if current.day not in evening_center_off_days:
+                model.Add(shift_vars[(evening_center_idx, day_idx, "E")] == 1)
 
 
 def apply_hard_constraints(
@@ -111,9 +129,22 @@ def apply_hard_constraints(
 ) -> None:
     total_days = len(dates)
     regular_team_names = sorted({nurse.team for nurse in nurses if nurse.team in {"A", "B", "C", "D"}})
+    day_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_day_nurse_id))
+    evening_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_evening_nurse_id))
+
     for nurse_idx, nurse in enumerate(nurses):
+        allowed_shift_types = parse_allowed_shift_types(nurse.allowed_shift_types)
+        wanted_off_days = parse_wanted_off_days(nurse.wanted_off)
         n_vars = [shift_vars[(nurse_idx, day_idx, "N")] for day_idx in range(total_days)]
         model.Add(sum(n_vars) <= nurse.max_nights_per_month)
+
+        for day_idx, current in enumerate(dates):
+            if wanted_off_days and current.day in wanted_off_days:
+                model.Add(shift_vars[(nurse_idx, day_idx, "O")] == 1)
+            if allowed_shift_types:
+                for shift in WORK_SHIFTS:
+                    if shift not in allowed_shift_types:
+                        model.Add(shift_vars[(nurse_idx, day_idx, shift)] == 0)
 
         work_vars = [sum(shift_vars[(nurse_idx, day_idx, shift)] for shift in WORK_SHIFTS) for day_idx in range(total_days)]
 
@@ -188,9 +219,8 @@ def apply_hard_constraints(
 
         if nurse.team == "E":
             for day_idx, current in enumerate(dates):
-                model.Add(shift_vars[(nurse_idx, day_idx, "D")] == 0)
                 model.Add(shift_vars[(nurse_idx, day_idx, "N")] == 0)
-                if current.weekday() < 5:
+                if current.weekday() < 5 and current.day not in evening_center_off_days:
                     model.Add(shift_vars[(nurse_idx, day_idx, "E")] == 0)
                 elif nurse.competency_level != 3:
                     model.Add(shift_vars[(nurse_idx, day_idx, "E")] == 0)
@@ -217,13 +247,30 @@ def apply_hard_constraints(
                 == 1
             )
         else:
+            weekday_e_team_evening = sum(
+                shift_vars[(nurse_idx, day_idx, "E")]
+                for nurse_idx, nurse in enumerate(nurses)
+                if nurse.team == "E"
+            )
+            weekday_e_team_evening_level3 = sum(
+                shift_vars[(nurse_idx, day_idx, "E")]
+                for nurse_idx, nurse in enumerate(nurses)
+                if nurse.team == "E" and nurse.competency_level == 3
+            )
+            if dates[day_idx].day in evening_center_off_days:
+                model.Add(weekday_e_team_evening_level3 == 1)
+                model.Add(weekday_e_team_evening == weekday_e_team_evening_level3)
+            else:
+                model.Add(weekday_e_team_evening == 0)
+
+        if dates[day_idx].weekday() < 5 and dates[day_idx].day in day_center_off_days:
             model.Add(
                 sum(
-                    shift_vars[(nurse_idx, day_idx, "E")]
+                    shift_vars[(nurse_idx, day_idx, "D")]
                     for nurse_idx, nurse in enumerate(nurses)
-                    if nurse.team == "E"
+                    if nurse.team == "E" and nurse.competency_level == 3
                 )
-                == 0
+                >= 1
             )
 
         for shift in ("D", "E", "N"):
@@ -265,46 +312,79 @@ def allows_five_streak_exception(
 def add_objective(
     model: cp_model.CpModel,
     shift_vars: dict[tuple[int, int, str], cp_model.IntVar],
+    config: SchedulerConfig,
     nurses: list[Nurse],
     dates: list[date],
 ) -> None:
     total_days = len(dates)
-    total_n_demand = sum(4 for _ in dates)
-    total_work_demand = sum(16 if current.weekday() < 5 else 14 for current in dates)
-
-    target_n_floor = total_n_demand // len(nurses)
-    target_n_ceil = target_n_floor + (1 if total_n_demand % len(nurses) else 0)
-    target_work_floor = total_work_demand // len(nurses)
-    target_work_ceil = target_work_floor + (1 if total_work_demand % len(nurses) else 0)
-
+    day_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_day_nurse_id))
     fairness_penalties: list[cp_model.IntVar] = []
+    assignment_penalties: list[cp_model.IntVar] = []
+
     for nurse_idx, _ in enumerate(nurses):
         n_total = model.NewIntVar(0, total_days, f"n_total_{nurse_idx}")
         work_total = model.NewIntVar(0, total_days, f"work_total_{nurse_idx}")
         model.Add(n_total == sum(shift_vars[(nurse_idx, day_idx, "N")] for day_idx in range(total_days)))
         model.Add(work_total == sum(shift_vars[(nurse_idx, day_idx, shift)] for day_idx in range(total_days) for shift in WORK_SHIFTS))
 
-        n_penalty = model.NewIntVar(0, total_days, f"n_penalty_{nurse_idx}")
-        work_penalty = model.NewIntVar(0, total_days, f"work_penalty_{nurse_idx}")
-        model.AddMaxEquality(n_penalty, [target_n_floor - n_total, n_total - target_n_ceil, 0])
-        model.AddMaxEquality(work_penalty, [target_work_floor - work_total, work_total - target_work_ceil, 0])
-        fairness_penalties.extend([n_penalty, work_penalty])
+        fairness_penalties.extend(
+            build_fairness_penalty(model, n_total, work_total, total_days, len(nurses), dates, nurse_idx)
+        )
 
-    non_e_team_p = []
-    e_team_level3_p = []
-    e_team_level2_p = []
     for nurse_idx, nurse in enumerate(nurses):
         for day_idx in range(total_days):
+            p_assignment = shift_vars[(nurse_idx, day_idx, "P")]
             if nurse.team != "E":
-                non_e_team_p.append(shift_vars[(nurse_idx, day_idx, "P")])
+                assignment_penalties.append(_weighted_term(model, p_assignment, NON_E_TEAM_P_PENALTY, f"non_e_team_p_{nurse_idx}_{day_idx}"))
             elif nurse.competency_level == 3:
-                e_team_level3_p.append(shift_vars[(nurse_idx, day_idx, "P")])
-            elif nurse.competency_level == 2:
-                e_team_level2_p.append(shift_vars[(nurse_idx, day_idx, "P")])
+                assignment_penalties.append(_weighted_term(model, p_assignment, E_TEAM_LEVEL3_P_PENALTY, f"e_team_lvl3_p_{nurse_idx}_{day_idx}"))
+                if dates[day_idx].day not in day_center_off_days:
+                    assignment_penalties.append(
+                        _weighted_term(
+                            model,
+                            shift_vars[(nurse_idx, day_idx, "D")],
+                            E_TEAM_LEVEL3_D_PENALTY,
+                            f"e_team_lvl3_d_{nurse_idx}_{day_idx}",
+                        )
+                    )
+
+        for shift in ("D", "E", "P"):
+            for start in range(total_days - 4):
+                if allows_five_streak_exception(config, nurse, dates[start : start + 5], shift):
+                    continue
+                assignment_penalties.append(
+                    _pattern_penalty(
+                        model,
+                        [shift_vars[(nurse_idx, day_idx, shift)] for day_idx in range(start, start + 5)],
+                        FIVE_STREAK_PENALTY,
+                        f"{shift.lower()}_streak_{nurse_idx}_{start}",
+                    )
+                )
 
     model.Minimize(
-        10000 * sum(non_e_team_p)
-        + 1000 * sum(e_team_level3_p)
-        - 1000 * sum(e_team_level2_p)
+        sum(assignment_penalties)
         + sum(fairness_penalties)
     )
+
+
+def _pattern_penalty(
+    model: cp_model.CpModel,
+    variables: list[cp_model.IntVar],
+    weight: int,
+    name: str,
+) -> cp_model.IntVar:
+    indicator = model.NewBoolVar(f"{name}_hit")
+    model.AddBoolAnd(variables).OnlyEnforceIf(indicator)
+    model.AddBoolOr([variable.Not() for variable in variables]).OnlyEnforceIf(indicator.Not())
+    return _weighted_term(model, indicator, weight, name)
+
+
+def _weighted_term(
+    model: cp_model.CpModel,
+    source_var: cp_model.IntVar,
+    weight: int,
+    name: str,
+) -> cp_model.IntVar:
+    weighted = model.NewIntVar(0, weight, f"{name}_weighted")
+    model.Add(weighted == weight * source_var)
+    return weighted

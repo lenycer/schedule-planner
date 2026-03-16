@@ -2,18 +2,20 @@ from __future__ import annotations
 
 from collections import Counter
 
-from .generator import GeneratedSchedule, allows_five_streak_exception, build_requirements
-from .models import Nurse, SchedulerConfig, WORK_SHIFTS
-from .rules import calculate_soft_penalty, weekly_hours
+from .generator import GeneratedSchedule, build_requirements
+from .models import Nurse, SchedulerConfig, WORK_SHIFTS, parse_allowed_shift_types, parse_wanted_off_days
+from .rules import calculate_soft_penalty, allows_five_streak_exception, weekly_hours
 
 
 def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: SchedulerConfig) -> list[str]:
     violations: list[str] = []
     requirements = build_requirements(schedule.dates)
     nurse_by_id = {nurse.nurse_id: nurse for nurse in nurses}
+    day_center_off_days = parse_wanted_off_days(nurse_by_id[config.center_day_nurse_id].wanted_off)
+    evening_center_off_days = parse_wanted_off_days(nurse_by_id[config.center_evening_nurse_id].wanted_off)
 
     for nurse_id, row in schedule.assignments.items():
-        violations.extend(validate_nurse_row(nurse_by_id[nurse_id], row))
+        violations.extend(validate_nurse_row(nurse_by_id[nurse_id], row, schedule.dates))
         violations.extend(validate_five_streak_exception(nurse_by_id[nurse_id], row, schedule.dates, config))
 
     for day_index, requirement in enumerate(requirements):
@@ -22,21 +24,38 @@ def validate_schedule(schedule: GeneratedSchedule, nurses: list[Nurse], config: 
             actual = counts.get(shift, 0)
             if actual != expected:
                 violations.append(f"{requirement.day.isoformat()} {shift} 수요 불일치: expected={expected}, actual={actual}")
-        violations.extend(validate_day_team_and_competency(schedule, nurses, day_index, requirement.day))
+        violations.extend(
+            validate_day_team_and_competency(
+                schedule,
+                nurses,
+                day_index,
+                requirement.day,
+                day_center_off_days,
+                evening_center_off_days,
+            )
+        )
 
     for day_index, current in enumerate(schedule.dates):
         if current.weekday() < 5:
-            if schedule.assignments[config.center_day_nurse_id][day_index] != "D":
+            if current.day in day_center_off_days:
+                if schedule.assignments[config.center_day_nurse_id][day_index] != "O":
+                    violations.append(f"{current.isoformat()} 데이 중앙 근무자 wanted off 미반영")
+            elif schedule.assignments[config.center_day_nurse_id][day_index] != "D":
                 violations.append(f"{current.isoformat()} 데이 중앙 근무자 미배정")
-            if schedule.assignments[config.center_evening_nurse_id][day_index] != "E":
+            if current.day in evening_center_off_days:
+                if schedule.assignments[config.center_evening_nurse_id][day_index] != "O":
+                    violations.append(f"{current.isoformat()} 이브 중앙 근무자 wanted off 미반영")
+            elif schedule.assignments[config.center_evening_nurse_id][day_index] != "E":
                 violations.append(f"{current.isoformat()} 이브 중앙 근무자 미배정")
 
     return violations
 
 
-def validate_nurse_row(nurse: Nurse, row: list[str]) -> list[str]:
+def validate_nurse_row(nurse: Nurse, row: list[str], dates: list) -> list[str]:
     violations: list[str] = []
     night_count = row.count("N")
+    allowed_shift_types = parse_allowed_shift_types(nurse.allowed_shift_types)
+    wanted_off_days = parse_wanted_off_days(nurse.wanted_off)
     if night_count > nurse.max_nights_per_month:
         violations.append(f"{nurse.nurse_id} 월간 N 초과: {night_count}")
 
@@ -57,6 +76,10 @@ def validate_nurse_row(nurse: Nurse, row: list[str]) -> list[str]:
             violations.append(f"{nurse.nurse_id} 연속근무 초과 at day {index + 1}")
         if consecutive_n > 3:
             violations.append(f"{nurse.nurse_id} 연속 N 초과 at day {index + 1}")
+        if allowed_shift_types and code in WORK_SHIFTS and code not in allowed_shift_types:
+            violations.append(f"{nurse.nurse_id} 허용되지 않은 근무타입 at day {index + 1}: {code}")
+        if dates[index].day in wanted_off_days and code != "O":
+            violations.append(f"{nurse.nurse_id} wanted off 미반영 at day {index + 1}")
 
         if index >= 1 and row[index - 1] == "N" and code not in {"N", "O"}:
             violations.append(f"{nurse.nurse_id} N 다음날 금지 패턴 at day {index + 1}: N{code}")
@@ -90,8 +113,13 @@ def validate_nurse_row(nurse: Nurse, row: list[str]) -> list[str]:
     return violations
 
 
-def summarize_schedule(schedule: GeneratedSchedule, nurses: list[Nurse]) -> dict[str, dict[str, int]]:
+def summarize_schedule(
+    schedule: GeneratedSchedule,
+    nurses: list[Nurse],
+    config: SchedulerConfig,
+) -> dict[str, dict[str, int]]:
     summary: dict[str, dict[str, int]] = {}
+    day_center_off_days = parse_wanted_off_days(next(nurse.wanted_off for nurse in nurses if nurse.nurse_id == config.center_day_nurse_id))
     for nurse in nurses:
         row = schedule.assignments[nurse.nurse_id]
         summary[nurse.nurse_id] = {
@@ -101,7 +129,14 @@ def summarize_schedule(schedule: GeneratedSchedule, nurses: list[Nurse]) -> dict
             "prns": row.count("P"),
             "offs": row.count("O"),
             "max_consecutive_work": max_consecutive_workdays(row),
-            "soft_penalty": calculate_soft_penalty(row),
+            "soft_penalty": calculate_soft_penalty(
+                row,
+                nurse,
+                schedule.dates,
+                config.center_day_nurse_id,
+                config.center_evening_nurse_id,
+                day_center_off_days,
+            ),
         }
     return summary
 
@@ -129,7 +164,13 @@ def validate_five_streak_exception(
         for start in range(len(row) - 4):
             if row[start : start + 5] != [shift] * 5:
                 continue
-            if allows_five_streak_exception(config, nurse, dates[start : start + 5], shift):
+            if allows_five_streak_exception(
+                nurse,
+                dates[start : start + 5],
+                shift,
+                config.center_day_nurse_id,
+                config.center_evening_nurse_id,
+            ):
                 continue
             violations.append(f"{nurse.nurse_id} {shift} 5연속 금지 at day {start + 5}")
     return violations
@@ -140,6 +181,8 @@ def validate_day_team_and_competency(
     nurses: list[Nurse],
     day_index: int,
     day,
+    day_center_off_days: set[int],
+    evening_center_off_days: set[int],
 ) -> list[str]:
     violations: list[str] = []
     team_names = sorted({nurse.team for nurse in nurses if nurse.team in {"A", "B", "C", "D"}})
@@ -168,8 +211,24 @@ def validate_day_team_and_competency(
             violations.append(f"{day.isoformat()} E팀 주말 E 중앙 미충족")
         if e_team_evening_total != e_team_evening_level3:
             violations.append(f"{day.isoformat()} E팀 주말 E 역량3 외 배정")
+    elif day.day in evening_center_off_days:
+        if e_team_evening_level3 != 1:
+            violations.append(f"{day.isoformat()} E팀 평일 E 중앙 대체 미충족")
+        if e_team_evening_total != e_team_evening_level3:
+            violations.append(f"{day.isoformat()} E팀 평일 E 역량3 외 배정")
     elif e_team_evening_total != 0:
         violations.append(f"{day.isoformat()} E팀 평일 E 배정 금지")
+
+    if day.weekday() < 5 and day.day in day_center_off_days:
+        e_team_day_level3 = sum(
+            1
+            for nurse in nurses
+            if nurse.team == "E"
+            and nurse.competency_level == 3
+            and schedule.assignments[nurse.nurse_id][day_index] == "D"
+        )
+        if e_team_day_level3 == 0:
+            violations.append(f"{day.isoformat()} E팀 평일 D 중앙 대체 미충족")
 
     for shift in ("D", "E", "N"):
         level3_count = sum(
@@ -194,11 +253,13 @@ def validate_day_team_and_competency(
             violations.append(f"{day.isoformat()} {nurse.nurse_id} P 근무 역량1 금지")
         if nurse.team == "E":
             code = schedule.assignments[nurse.nurse_id][day_index]
-            if code in {"D", "N"}:
-                violations.append(f"{day.isoformat()} {nurse.nurse_id} E팀 {code} 금지")
-            if day.weekday() < 5 and code == "E":
+            if code == "N":
+                violations.append(f"{day.isoformat()} {nurse.nurse_id} E팀 N 금지")
+            if day.weekday() < 5 and day.day not in evening_center_off_days and code == "E":
                 violations.append(f"{day.isoformat()} {nurse.nurse_id} E팀 평일 E 금지")
             if day.weekday() >= 5 and code == "E" and nurse.competency_level != 3:
                 violations.append(f"{day.isoformat()} {nurse.nurse_id} E팀 주말 E 역량3 필요")
+            if day.weekday() < 5 and day.day in evening_center_off_days and code == "E" and nurse.competency_level != 3:
+                violations.append(f"{day.isoformat()} {nurse.nurse_id} E팀 평일 E 중앙 대체 역량3 필요")
 
     return violations

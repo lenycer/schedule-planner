@@ -45,6 +45,8 @@ def load_nurses(path: str | Path | None, nurse_count: int) -> list[Nurse]:
                 employment_type=row.get("employment_type", "FULL_TIME"),
                 max_nights_per_month=int(row.get("max_nights_per_month", 8)),
                 max_consecutive_work_days=int(row.get("max_consecutive_work_days", 5)),
+                allowed_shift_types=row.get("allowed_shift_types", ""),
+                wanted_off=row.get("wanted_off", ""),
             )
             for row in rows[:nurse_count]
         ]
@@ -86,6 +88,8 @@ def write_nurse_pool(path: str | Path, nurses: list[Nurse]) -> None:
                 "employment_type",
                 "max_nights_per_month",
                 "max_consecutive_work_days",
+                "allowed_shift_types",
+                "wanted_off",
             ]
         )
         for nurse in nurses:
@@ -98,5 +102,7 @@ def write_nurse_pool(path: str | Path, nurses: list[Nurse]) -> None:
                     nurse.employment_type,
                     nurse.max_nights_per_month,
                     nurse.max_consecutive_work_days,
+                    nurse.allowed_shift_types,
+                    nurse.wanted_off,
                 ]
             )

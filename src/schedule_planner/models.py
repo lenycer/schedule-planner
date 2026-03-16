@@ -18,6 +18,8 @@ class Nurse:
     employment_type: str = "FULL_TIME"
     max_nights_per_month: int = 8
     max_consecutive_work_days: int = 5
+    allowed_shift_types: str = ""
+    wanted_off: str = ""
 
 
 @dataclass(frozen=True)
@@ -35,3 +37,23 @@ class SchedulerConfig:
 class DayRequirement:
     day: date
     demand: dict[str, int]
+
+
+def parse_allowed_shift_types(raw: str) -> set[str]:
+    normalized = (raw or "").strip().upper()
+    if not normalized:
+        return set()
+    return {code for code in normalized if code in WORK_SHIFTS}
+
+
+def parse_wanted_off_days(raw: str) -> set[int]:
+    raw = raw or ""
+    if not raw.strip():
+        return set()
+    values: set[int] = set()
+    for token in raw.split(","):
+        stripped = token.strip()
+        if not stripped:
+            continue
+        values.add(int(stripped))
+    return values
